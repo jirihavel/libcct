@@ -1,47 +1,68 @@
-#ifndef CONNECTED_COMPONENT_TREE_GRAPH_H_INCLUDED
-#define CONNECTED_COMPONENT_TREE_GRAPH_H_INCLUDED
-
-#include <cstdint>
-
-#include <algorithm>
+#ifndef LIBCCT_GRAPH_H_INCLUDED
+#define LIBCCT_GRAPH_H_INCLUDED
 
 namespace cct {
 
-namespace graph {
+template<typename V, typename W>
+struct Vertex
+{
+    typedef V VertexId;
+    typedef W Weight;
+
+    VertexId id;
+    Weight weight;
+
+    Vertex() = default;
+
+    void set(Weight w, VertexId i)
+    {
+        id = i;
+        weight = w;
+    }
+};
 
 template<typename V, typename W>
 struct Edge
 {
-    typedef V Vertex;
+    typedef V VertexId;
     typedef W Weight;
 
-    Vertex vertices[2];
-
+    VertexId vertices[2];
     Weight weight;
 
-    bool operator<(Edge const & e) const
+    Edge() = default;
+
+    Edge(V v0, V v1, W w) : weight(w)
+        { vertices[0] = v0; vertices[1] = v1; }
+
+    void set(Weight w, VertexId a, VertexId b)
     {
-        return weight < e.weight;
-    } 
+        vertices[0] = a;
+        vertices[1] = b;
+        weight = w;
+    }
 };
 
-template<typename V, typename W, typename EdgeWeightFunction> 
-size_t getSortedEdges(
-    V beg, V end, // vertex range
-    Edge<V, W> * edges,//[end-beg]
-    EdgeFunction f//f(V)
-);
-//template<typename V, typename EdgeWeightFunction> 
-//size_t getSortedEdges(
-//    V beg, V end, // vertex range
-//    Edge<V, uint8_t> * edges,//[end-beg]
-//    EdgeWeightFunction e//f(V)
-//);
+template<typename V, typename W>
+inline bool operator<(Vertex<V,W> const & a, Vertex<V,W> const & b) noexcept
+{
+    return a.weight < b.weight;
+}
+
+template<typename V, typename W>
+inline bool operator<(Edge<V,W> const & a, Edge<V,W> const & b) noexcept
+{
+    return a.weight < b.weight;
+}
+
+template<typename V, typename W>
+inline bool operator<(Vertex<V,W> const & v, Edge<V,W> const & e) noexcept
+{
+    return v.weight < e.weight;
+}
 
 #include "graph.inl"
 
-}//namespace graph
-
 }//namespace cct
 
-#endif//CONNECTED_COMPONENT_TREE_GRAPH_H_INCLUDED
+#endif//LIBCCT_GRAPH_H_INCLUDED

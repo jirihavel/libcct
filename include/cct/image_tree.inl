@@ -1,140 +1,170 @@
 template<
     typename T,
-    typename Builder,
+    typename Builder, typename Edge,
     typename EdgeWeightFunction
 >
 void buildAlphaTree(
     cv::Size_<T> const & size, cv::Size_<T> const & tile,
-    Builder & builder,
-    EdgeWeightFunction e
+    ThreadBuilder<Builder> & builder, EdgeWeightFunction e,
+    cv::Rect_<T> const & rect, std::vector<Edge> & edges
 )
 {
+    typedef typename Builder::size_type size_type;
     typedef cv::Point_<T> Point;
     typedef decltype(e(Point(),Point())) Weight;
-    typedef Edge<T, Weight> Edge;
 
-    std::vector<Edge> edges(edgeCount(size));
-    size_t const count = getSortedImageEdges(
-        cv::Rect_<T>(0, 0, size.width, size.height), tile, &edges[0], e);
-
-    ThreadBuilder<Builder> thread_builder(builder);
+    edges.resize(edgeCount<size_t>(rect.size()));
+    size_t const count = getSortedImageEdges(rect, tile, &edges[0], e);
+    size_t remaining_merges = vertexCount<size_t>(rect.size())-1;
 
     Weight lastWeight = edges[0].weight;
     for(size_t i = 0; i < count; ++i)
     {
         if(lastWeight < edges[i].weight)
         {
-            thread_builder.remove();
+            builder.remove();
             lastWeight = edges[i].weight;
         }
-        thread_builder.addEdge(
-            pointId(edges[i].points[0], size),
-            pointId(edges[i].points[1], size),
-            edges[i]
-        );
+        if(builder.addEdge(
+            pointId<size_type>(edges[i].points[0], size),
+            pointId<size_type>(edges[i].points[1], size),
+            edges[i]))
+        {
+            if(--remaining_merges == 0)
+                break;
+        }
     }
-    builder.finish(std::move(thread_builder));
+    builder.remove();
 }
 
 template<
     typename T,
-    typename B,
-    typename WeightFunction
-    >
+    typename Builder,
+    typename EdgeWeightFunction
+>
 void buildAlphaTree(
-    cv::Size_<T> const & size,
-    cv::Size_<T> const & tile,
-    ThreadBuilder<B> & builder,
-    WeightFunction e,
-    unsigned treeDepth,
-    cv::Rect_<T> const & rect
+    cv::Size_<T> const & size, cv::Size_<T> const & tile,
+    Builder & builder, EdgeWeightFunction e
 )
 {
     typedef cv::Point_<T> Point;
     typedef decltype(e(Point(),Point())) Weight;
     typedef Edge<T, Weight> Edge;
-    typedef typename B::Component Component;
 
-    if(treeDepth == 0)
+    ThreadBuilder<Builder> thread_builder(builder);
+    std::vector<Edge> edges;
+    buildAlphaTree(size, tile, thread_builder, e,
+            cv::Rect_<T>(0, 0, size.width, size.height), edges
+        );
+    builder.finish(std::move(thread_builder));
+}
+
+template<
+    typename T,
+    typename Builder, typename Edge,
+    typename EdgeWeightFunction
+    >
+void buildAlphaTree(
+    cv::Size_<T> const & size, cv::Size_<T> const & tile,
+    ThreadBuilder<Builder> & builder, EdgeWeightFunction e,
+    unsigned depth, cv::Rect_<T> const & rect, std::vector<Edge> & edges
+)
+{
+    typedef typename Builder::size_type size_type;
+    typedef cv::Point_<T> Point;
+    typedef typename Builder::Component Component;
+
+    if(depth == 0)
     {
-        size_t ec = edgeCount(rect.size());
-        std::vector<Edge> edges(ec);
-        size_t count = getSortedImageEdges(rect, tile, &edges[0], e);
-
-        size_t remaining_merges = vertexCount(rect.size())-1;
-
-        Weight lastWeight = edges[0].weight;
-        for(size_t i = 0; i < count; ++i)
-        {
-            if(lastWeight < edges[i].weight)
-            {
-                builder.remove();
-                lastWeight = edges[i].weight;
-            }
-            if(builder.addEdge(
-                pointId(edges[i].points[0], size),
-                pointId(edges[i].points[1], size),
-                edges[i])
-            )
-            {
-                if(--remaining_merges == 0)
-                    break;
-            }
-        }
-        builder.remove();
+        buildAlphaTree(size, tile, builder, e, rect, edges);
     }
     else
     {
         size_t count;
+        bool vertical_split;
         cv::Rect_<T> ra;
         cv::Rect_<T> rb;
-        if(rect.width > rect.height)
+        if((rect.width > rect.height) && (rect.width > 64))
         {
-            // split vertically
+            vertical_split = true;
+            // split vertically 
+            // - align to hardcoded multiple of cache lines to prevent false sharing
+            // TODO : calculate correct number from size of Leaf and size_type
             count = rect.height;
-            T w2 = rect.width/2;
-            ra = cv::Rect_<T>(rect.x, rect.y, w2, rect.height);
+            T w2 = (rect.width/2 + 63)&~static_cast<T>(63);
+            ra = cv::Rect_<T>(rect.x   , rect.y,            w2, rect.height);
             rb = cv::Rect_<T>(rect.x+w2, rect.y, rect.width-w2, rect.height);
         }
         else
         {
+            vertical_split = false;
             // split horizontally
             count = rect.width;
             T h2 = rect.height/2;
-            ra = cv::Rect_<T>(rect.x, rect.y, rect.width, h2);
+            ra = cv::Rect_<T>(rect.x, rect.y   , rect.width,             h2);
             rb = cv::Rect_<T>(rect.x, rect.y+h2, rect.width, rect.height-h2);
         }
         // build partial trees
-        ThreadBuilder<B> thread_builder(builder.builder());
-        // spawn thread, TODO : copy everything to its stack
+        ThreadBuilder<Builder> thread_builder(builder.builder());
+        // parallel part
+/*        #pragma omp parallel sections num_threads(2)
+        {
+            #pragma omp section
+            {
+                buildAlphaTree(size, tile, builder, e, depth-1, ra, edges);
+            }
+            #pragma omp section
+            {
+                std::vector<Edge> thread_edges;
+                buildAlphaTree(size, tile, thread_builder, e, depth-1, rb, thread_edges);
+            }
+        }*/
+        // spawn thread
         boost::thread task([&]()
         {
-            buildAlphaTree(size, tile, thread_builder, e, treeDepth-1, rb);
+            // TODO : copy everything to thread stack
+            std::vector<Edge> edges;
+            buildAlphaTree(size, tile, thread_builder, e, depth-1, rb, edges);
         });
-        buildAlphaTree(size, tile, builder, e, treeDepth-1, ra);
+        buildAlphaTree(size, tile, builder, e, depth-1, ra, edges);
+        //    buildAlphaTree(size, tile, thread_builder, e, depth-1, rb, edges);
         // extract connecting edges
-        std::vector<Edge> edges(count);
-        if(rect.width > rect.height)
+        edges.resize(count);
+        if(vertical_split)
         {
-            count = getSortedHorizontalConnectors(Point(rect.x+rect.width/2-1, rect.y), rect.height, &edges[0], e);
+            count = getSortedHorizontalConnectors(Point(rb.x-1, rect.y), rect.height, &edges[0], e);
         }
         else
         {
-            count = getSortedVerticalConnectors(Point(rect.x, rect.y+rect.height/2-1), rect.width, &edges[0], e);
+            count = getSortedVerticalConnectors(Point(rect.x, rb.y-1), rect.width, &edges[0], e);
         }
         // merge trees
         task.join();
         builder.absorb(std::move(thread_builder));
-        for(size_t i = 0; i < count; ++i)
+        // zip paths
+        size_t i = 0;
+        Component * n = nullptr;
+        for(; !builder.hasSingleRoot() && (i < count); ++i)
         {
             Edge const & edge = edges[i];
-            auto a = pointId(edge.points[0], size);
-            auto b = pointId(edge.points[1], size);
-            Component * n = builder.merge_roots(a, b, edge);
+            auto a = pointId<size_type>(edge.points[0], size);
+            auto b = pointId<size_type>(edge.points[1], size);
+            n = builder.merge_roots(a, b, edge);
             if(*n <= edge)
-                break;//continue;
+                continue;
             builder.merge_paths(a, b, edge);
         }
+        // only one root remains now
+        for(; i < count; ++i)
+        {
+            Edge const & edge = edges[i];
+            auto a = pointId<size_type>(edge.points[0], size);
+            auto b = pointId<size_type>(edge.points[1], size);
+            if(*n <= edge)
+                break;// stop when no more edges will modify the tree
+            builder.merge_paths(a, b, edge);
+        }
+//        builder.prune();
     }
 }
 
@@ -151,10 +181,15 @@ void buildAlphaTree(
     unsigned depth
 )
 {
+    typedef cv::Point_<T> Point;
+    typedef decltype(e(Point(),Point())) Weight;
+    typedef Edge<T, Weight> Edge;
+
     ThreadBuilder<Builder> thread_builder(builder);
+    std::vector<Edge> edges;
     buildAlphaTree(size, tile, thread_builder, e, depth,
-        cv::Rect_<T>(0, 0, size.width, size.height)
-    );
+            cv::Rect_<T>(0, 0, size.width, size.height), edges
+        );
     builder.finish(std::move(thread_builder));
 }
 

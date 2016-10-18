@@ -1,5 +1,5 @@
-#ifndef CONNETED_COMPONENT_TREE_NODE_H_INCLUDED
-#define CONNETED_COMPONENT_TREE_NODE_H_INCLUDED
+#ifndef LIBCCT_NODE_H_INCLUDED
+#define LIBCCT_NODE_H_INCLUDED
 
 #include "utils/tagged_ptr.h"
 
@@ -13,41 +13,96 @@ namespace cct {
 
 struct TreeParameters
 {
+    /**
+     * Size optimization.
+     * 32b size should be enough even on 64b systems
+     */
     typedef uint32_t size_type;
 
+    /** \brief Is child count cached?
+     *
+     * Memory/speed tradeoff.
+     * With cached child count, it is possible to insert smaller nodes into bigger ones.
+     */
     static constexpr bool constant_time_children_size = true;
-};
+
+    static constexpr size_t node_alignment_bits = 0;
+    static constexpr size_t comp_alignment_bits = 1;
+
+    // calculated stuff
+
+    static constexpr size_t node_alignment = 1<<node_alignment_bits;
+    static constexpr size_t comp_alignment = 1<<comp_alignment_bits;
+
+    // invariants
     
-namespace base {
-/*
+    static_assert(comp_alignment_bits >= node_alignment_bits, "node base alignment");
+};
+
+typedef TreeParameters DefaultTreeParams;
+    
+namespace node {
+
+const unsigned PARENT_ALIGNMENT_BITS = 1;
+
 class Parent;
 class Child;
 
 class Child
     : public boost::intrusive::list_base_hook<>
 {
-    Parent * m_parent;
+    using ParentPtr = utils::tagged_ptr<Parent, PARENT_ALIGNMENT_BITS>;
+protected :
+    explicit Child(bool is_leaf) : m_parent(is_leaf ? 0 : 1) {}
 public :
+    Parent * parent() noexcept { return m_parent.get(); }
+    Parent * setParent(Parent * p) noexcept
+    {
+        Parent * o = parent();
+        m_parent.set(p);
+        return o;
+    }
+private :
+    ParentPtr m_parent;
 };
 
-class Parent
+class alignas(1<<PARENT_ALIGNMENT_BITS) Parent
 {
-    typedef boost::intrusive::list<
-            Child,
-            boost::intrusive::constant_time_size<false>
-        > Children;
-
-    Children m_children;
+    using Children = boost::intrusive::list<Child,
+            boost::intrusive::constant_time_size<true>
+        >;
 public :
+private :
+    Children m_children;
 };
-*/
-}//namespace base    
 
-struct NodeBase;
-struct LeafBase;
-struct ComponentBase;
+class Root
+    : public Parent
+{
+};
 
-constexpr size_t NODE_ALIGNMENT_BITS = 2;
+class Comp
+    : public Parent, public Child
+{
+public :
+    Comp() : Child(false) {}
+};
+
+class Leaf
+    : public Child
+{
+public :
+    Leaf() : Child(true) {}
+};
+
+}//namespace node    
+
+template<typename TreeParams>
+class NodeBase;
+template<typename TreeParams>
+class LeafBase;
+template<typename TreeParams>
+class ComponentBase;
 
 /** Base class for both tree nodes.
  *
@@ -57,43 +112,42 @@ constexpr size_t NODE_ALIGNMENT_BITS = 2;
  *
  * \section nodes
  */
-class alignas(1<<NODE_ALIGNMENT_BITS) NodeBase
+template<typename TreeParams>
+class NodeBase
     : public boost::intrusive::list_base_hook<>
 {
-private :
-    typedef utils::tagged_ptr<ComponentBase, NODE_ALIGNMENT_BITS> ParentPtr;
-
-    ParentPtr m_parent;
 public :
-    typedef NodeBase Node;
-
-    typedef typename ParentPtr::tag_type Tag;
-
-    /**
-     * Size optimization.
-     * 32b size should be enough even on 64b systems
-     */
-    typedef uint32_t size_type;
+    typedef TreeParams tree_params;
+    typedef typename tree_params::size_type size_type;
+    typedef NodeBase node_type;
+    typedef ComponentBase<TreeParams> comp_type;
+private :
+    typedef utils::tagged_ptr<comp_type, TreeParams::comp_alignment_bits> ParentPtr;
+public :
+    typedef typename ParentPtr::tag_type tag_type;
 
     /** \brief Default constructor. parent=nullptr, tag=0 */
     NodeBase() noexcept
         : m_parent(nullptr) {}
 
-    explicit NodeBase(Tag tag) noexcept
+    explicit NodeBase(tag_type tag) noexcept
         : m_parent(nullptr, tag) {}
 
+    NodeBase(comp_type * par, tag_type tag) noexcept
+        : m_parent(par, tag) {}
+
     // Node is noncopyable
-    NodeBase(Node const &) = delete;
-    NodeBase & operator=(Node const &) = delete;
+    NodeBase(node_type const &) = delete;
+    NodeBase & operator=(node_type const &) = delete;
 
     /** Returns parent node.
      * root -> nullptr
      */
-    ComponentBase       * parent()       noexcept
+    comp_type       * parent()       noexcept
     {
         return m_parent.get();
     }
-    ComponentBase const * parent() const noexcept
+    comp_type const * parent() const noexcept
     {
         return m_parent.get();
     }
@@ -105,7 +159,7 @@ public :
      * tag != 0 -> component
      * TODO : Something else?
      */
-    Tag tag() const noexcept
+    tag_type tag() const noexcept
     {
         return m_parent.get_tag();
     }
@@ -118,12 +172,19 @@ public :
     {
         return tag() != 0;
     }
+    bool isRoot() const noexcept
+    {
+        return !parent();
+    }
 
     /** \brief Set new parent node. */
-    void setParent(ComponentBase * node) noexcept;
+    void setParent(comp_type * node) noexcept;
 
-    /** \brief Traverse up, return node with parent == nullptr. */
-    ComponentBase * root() noexcept;
+    /** \brief Traverse up, return node with parent == nullptr.
+     *
+     * O(H)
+     */
+    comp_type * root() noexcept;
 
     /** \brief Unlink a node from its parent
      * postconditions :
@@ -131,30 +192,46 @@ public :
      * returns :
      *  previous parent (or nullptr)
      */
-    ComponentBase * unlink() noexcept;
+    comp_type * unlink() noexcept;
 
     /** Is a node ancestor of *this?
+     *
+     * O(H)
      */
-    bool isLinkedTo(ComponentBase const * ancestor) const noexcept;
+    bool isLinkedTo(comp_type const * ancestor) const noexcept;
+
+    /** \brief Is this component subset of node?
+     */
+    bool isSubOf(comp_type const * node) const noexcept
+    {
+        return (this == node) || isLinkedTo(node);
+    }
+private :
+    ParentPtr m_parent;
 };
 
 /** Base class of leaf nodes.
  * \section nodes
  */
+template<typename TreeParams>
 struct LeafBase
-    : public NodeBase
+    : public NodeBase<TreeParams>
 {
-    typedef typename NodeBase::size_type size_type;
+    typedef NodeBase<TreeParams> Base;
+    typedef typename Base::size_type size_type;
+    typedef typename Base::comp_type comp_type;
+
+    LeafBase() noexcept
+        : Base(0) {}
 
     ~LeafBase() noexcept
     {
-        // Tag is intact
-        BOOST_ASSERT(isLeaf());
+        BOOST_ASSERT(Base::isLeaf());
     }
 
     /** \brief Traverse tree and calculate height.
      *
-     * O(tree_height)
+     * O(H)
      */
     size_type calculateHeight() const noexcept;
 };
@@ -166,37 +243,36 @@ struct LeafBase
  *
  * \section nodes
  */
-struct ComponentBase
-    : public NodeBase
+template<typename TreeParams>
+class ComponentBase
+    : public NodeBase<TreeParams>
 {
-    /** \brief Is child count cached?
-     *
-     * Memory/speed tradeoff.
-     * With cached child count, it is possible to insert smaller nodes into bigger ones.
-     */
-    static constexpr bool constant_time_children_size = true;
+    friend class NodeBase<TreeParams>;
+    using Node = NodeBase<TreeParams>;
+public :
+    using Leaf = LeafBase<TreeParams>;
+    using size_type = typename Node::size_type;
 
-    typedef typename NodeBase::size_type size_type;
-//private :
-    /** Intrusive list of child nodes.
-     * 2 pointers
-     */
-    typedef boost::intrusive::list<Node,
-        boost::intrusive::size_type<size_type>,
-        boost::intrusive::constant_time_size<constant_time_children_size>
-        > Children;
-
-    //list is partially sorted, so leaves are after internal nodes
-    Children children;
+//    typedef typename Base::node_type node_type;
+//    typedef typename Base::size_type size_type;
+//    typedef LeafBase<TreeParams> leaf_type;
+    static constexpr bool constant_time_children_size
+        = TreeParams::constant_time_children_size;
+private :
+    using ChildList = boost::intrusive::list<Node,
+            boost::intrusive::size_type<size_type>,
+            boost::intrusive::constant_time_size<
+                TreeParams::constant_time_children_size>
+        >;
 public :
     /** Iterator
      * \subsection component_container
      */
-    typedef typename Children::      iterator       iterator;
+    typedef typename ChildList::      iterator       iterator;
     /** Const Iterator
      * \subsection component_container
      */
-    typedef typename Children::const_iterator const_iterator;
+    typedef typename ChildList::const_iterator const_iterator;
 
     bool empty() const noexcept
     {
@@ -215,27 +291,34 @@ public :
     {
         return children.begin();
     }
+          iterator begin()       noexcept
+    {
+        return children.begin();
+    }
+
     const_iterator end() const noexcept
     {
         return children.end();
     }
-    iterator begin() noexcept
-    {
-        return children.begin();
-    }
-    iterator end() noexcept
+          iterator end()       noexcept
     {
         return children.end();
     }
 
-    ComponentBase() noexcept
-        : NodeBase(1) {}
+    Node const & front() const noexcept
+    {
+        return children.front();
+    }
+    Node       & front()       noexcept
+    {
+        return children.front();
+    }
+
+    ComponentBase() noexcept : Node(1) {}
     
     ~ComponentBase() noexcept
     {
-        // Tag is intact
-        BOOST_ASSERT(isComponent());
-        // Child list must be empty when destroyed
+        BOOST_ASSERT(this->isComponent());//tag is intact
         BOOST_ASSERT(empty());
     }
 
@@ -243,7 +326,7 @@ public :
      */
     bool isDegenerate() const noexcept
     {
-        return empty() || (++begin() == end());
+        return empty() || (begin()->isComponent() && (++begin() == end()));
     }
 
     /** \brief Link leaf to parent(this)
@@ -252,7 +335,7 @@ public :
      * postconditions :
      *  leaf is linked to <this>
      */
-    void link(LeafBase * leaf) noexcept;
+    void link(Leaf * leaf) noexcept;
 
     /** see link(Leaf *)
      */
@@ -268,20 +351,55 @@ public :
 
     /** \brief Reconnect children of node to this */
     void absorb(ComponentBase & node) noexcept;
+
+    /** \brief children.size() < c.children.size() if possible in O(1)
+     */
+    bool smallerThanInO1(ComponentBase const & c) const noexcept;
+
+    template<typename ComponentFunctor>
+    void forEachChild(ComponentFunctor c) noexcept
+    {
+        typename ChildList::iterator i = children.begin();
+        while((i != children.end()) && i->isComponent())
+        {
+            c(static_cast<ComponentBase&>(*i)); ++i;
+        }
+    }
+
+    template<typename ComponentFunctor, typename LeafFunctor>
+    void forEachChild(ComponentFunctor c, LeafFunctor l) noexcept
+    {
+        typename ChildList::iterator i = children.begin();
+        while((i != children.end()) && i->isComponent())
+        {
+            c(static_cast<ComponentBase&>(*i)); ++i;
+        }
+        while(i != children.end())
+        {
+            l(static_cast<Leaf&>(*i)); ++i;
+        }
+    }
+private :
+    /** Intrusive list of child nodes.
+     * 2 pointers
+     * list is partially sorted, so leaves are after internal nodes
+     */
+    ChildList children;
 };
 
-std::ostream & operator<<(std::ostream & o, ComponentBase const &)
+template<typename P>
+inline std::ostream & operator<<(std::ostream & o, ComponentBase<P> const &)
 {
     return o;
 }
-std::ostream & operator<<(std::ostream & o, LeafBase const &)
+template<typename P>
+inline std::ostream & operator<<(std::ostream & o, LeafBase<P> const &)
 {
     return o;
 }
 
-//implementations are in separate file
 #include "node.inl"
 
 }//namespace cct
 
-#endif//CONNETED_COMPONENT_TREE_NODE_H_INCLUDED
+#endif//LIBCCT_NODE_H_INCLUDED

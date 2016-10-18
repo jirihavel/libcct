@@ -4,15 +4,8 @@
 #include <iostream>
 
 #include <boost/test/unit_test.hpp>
-/*
-BOOST_AUTO_TEST_CASE( array_tree_init )
-{
-    using Tree = cct::array::Tree<uint8_t, uint8_t, uint8_t>;
 
-    Tree tree;
-}
-*/
-BOOST_AUTO_TEST_CASE( array_tree )
+BOOST_AUTO_TEST_CASE( base_tree )
 {
     static uint8_t const leaf_count = 8;
     static cct::Edge<uint8_t, uint8_t> const edges[] = {

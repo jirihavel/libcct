@@ -1,39 +1,37 @@
-#ifndef CONNECTED_COMPONENT_TREE_IMAGE_TREE_H_INCLUDED
-#define CONNECTED_COMPONENT_TREE_IMAGE_TREE_H_INCLUDED
+#ifndef LIBCCT_IMAGE_TREE_H_INCLUDED
+#define LIBCCT_IMAGE_TREE_H_INCLUDED
 
-#include "node.h"
+#include "graph.h"
 #include "tree.h"
-#include "builder.h"
-#include "image_graph.h"
+#include "image.h"
 
 #include <type_traits>
 
-#include <boost/thread/thread.hpp>
+#include <opencv2/core/core.hpp>
 
 namespace cct {
+namespace img {
 
-namespace image {
-
-template<typename Level>
+template<typename LevelType>
 class Component
-    : public cct::ComponentBase
+    : public cct::ComponentBase<DefaultTreeParams>
 {
-private :
-    typedef cct::ComponentBase Base;
-    Level m_level;
 public :
+    using Base  = cct::ComponentBase<DefaultTreeParams>;
+    using Level = LevelType;
+
     template<typename T, typename W>
-    explicit Component(Vertex<T,W> const & v)
+    explicit Component(cct::Vertex<T,W> const & v)
         : m_level(v.weight)
     {}
 
     template<typename T, typename W>
-    explicit Component(Edge<T,W> const & e)
+    explicit Component(cct::Edge<T,W> const & e)
         : m_level(e.weight)
     {}
 
     template<typename T, typename W>
-    void init(Edge<T,W> const & e)
+    void init(cct::Edge<T,W> const & e)
     {
         BOOST_ASSERT(!Base::parent());
         BOOST_ASSERT(Base::empty());
@@ -46,17 +44,17 @@ public :
     }
 
     template<typename T, typename W>
-    bool operator<(Vertex<T,W> const & v) const
+    bool operator<(cct::Vertex<T,W> const & v) const
     {
         return level() < v.weight;
     }
     template<typename T, typename W>
-    bool operator<(Edge<T,W> const & e) const
+    bool operator<(cct::Edge<T,W> const & e) const
     {
         return level() < e.weight;
     }
     template<typename T, typename W>
-    bool operator<=(Edge<T,W> const & e) const
+    bool operator<=(cct::Edge<T,W> const & e) const
     {
         return level() <= e.weight;
     }
@@ -68,21 +66,40 @@ public :
     {
         return level() <= node.level();
     }
+private :
+    Level m_level;
 };
 
 template<typename L>
 std::ostream & operator<<(std::ostream & o, Component<L> const & c)
 {
-    return o << c.level();
+    return o << +c.level();
 }
 
-std::ostream & operator<<(std::ostream & o, Component<uint8_t> const & c)
+using Leaf = cct::LeafBase<DefaultTreeParams>;
+
+template<typename Tree>
+class Printer
 {
-    return o << unsigned(c.level());
-}
+    using Type = typename Tree::LeafIndex;
+    using Size = cv::Size_<Type>;
+public :
+    Printer(Size const & s) : m_size(s) {}
 
-typedef cct::LeafBase Leaf;
-
+    std::ostream & print(std::ostream & o, Tree const &, typename Tree::Component const & c) const
+    {
+        return o << '[' << c << ']';
+    }
+    std::ostream & print(std::ostream & o, Tree const & t, typename Tree::Leaf const & l) const
+    {
+        auto const i = t.leafId(l);
+        auto const p = idToPoint<Type>(i, m_size);
+        return o << '(' << i << ':' << p.x << ',' << p.y << ')';
+    }
+private :
+    Size m_size;
+};
+#if 0
 /** \brief Alpha-tree construction
  */
 template<
@@ -124,9 +141,8 @@ void buildSecondOrderTree(
         );
 */
 #include "image_tree.inl"
-
-}//namespace image
-
+#endif
+}//namespace img
 }//namespace cct
 
-#endif//CONNECTED_COMPONENT_TREE_IMAGE_TREE_H_INCLUDED
+#endif//LIBCCT_IMAGE_TREE_H_INCLUDED

@@ -1,56 +1,70 @@
+#ifndef LIBCCT_ARRAY_TREE_H_INCLUDED
+#define LIBCCT_ARRAY_TREE_H_INCLUDED
+
+#include "builder.h"
+
+#include <utils/enum_flags.h>
+#include <utils/fp.h>
+
 #include <cstring>
 
+#include <algorithm>
+#include <memory>
 #include <utility>
 
 #include <boost/assert.hpp>
-/*
- * lc - leaf count
- * cc - component count
- * nc = (lc + cc) - node count
- * cm - maximal component count
- * * lc-1 for bpt
- * nm - maximal node count 
- * * lc+cm = lc*2-1 for bpt
- *
- * parents[nm]
- * * index of parent node n-lc
- * * !!! parents[i]+lc > i
- * * root : cm = lc-1
- * * unused : 0 - valid only for leaves, which are always used
- * * values in [0,cm] = [0,lc[
- * * bits : ceil(log2(lc))
- *
- * levels[cm] for alpha-tree, levels[nm] for 2nd order tree
- * * node levels, unknown type
- * * maybe pack into parents[]
- * * !!! a < b -> levels[a] <= levels[b]
- *
- * merges[cm]
- * * temporary array for node merging
- * * node i was merged to merges[i-lc]+lc
- * * values in [0,cm[ = [0,lc-1[
- * * merges[i] == i - node is not merged
- * * !!! merges[i] >= i
- *
- * child_counts[cm]
- * * counts of child nodes
- * * values in ]0,lc] for used nodes (map to [0,lc[)
- * * bits : ceil(log2(lc))
- */
-template<typename IndexType, typename SizeType, typename LevelType>
-struct array_tree
+#include <boost/scoped_array.hpp>
+
+namespace cct {
+namespace array {
+
+enum class TreeFlags : uint8_t
 {
+    NONE = 0x0,
+    LEAF_LEVELS = 0x1,
+    CHILD_LIST  = 0x2,
+    CHILD_COUNT = 0x4,
+
+    ALTITUDE_FLAGS = CHILD_LIST,
+    ALPHA_FLAGS = CHILD_LIST | CHILD_COUNT,
+
+    ALL = UINT8_MAX
+};
+ENUM_FLAGS_OPERATORS(TreeFlags)
+
+template<typename IndexType, typename SizeType, typename LevelType>
+struct Tree
+{
+    // Abstract types to represent different kinds of nodes.
+    typedef IndexType LeafHandle;
+    typedef IndexType CompHandle;
+    typedef SizeType NodeHandle;
+
+    // Types representing counts
+    // - lc stands for max leaf count
+    typedef IndexType LeafCount;//[0,lc]
+    typedef IndexType CompCount;//[0,lc-1] for full binary tree
+    typedef SizeType NodeCount;//[0,2*lc-1]
+    typedef IndexType RootCount;//[0,lc]
+
+    typedef IndexType LeafIndex;//[0,lc[
+    typedef IndexType CompIndex;//[0,lc-1[
+    typedef SizeType NodeIndex;//[0,2*lc-1[
+
     // leaf/comp index
     // values in [0,leaf_count[
     typedef IndexType index_type;
-    // node index :
-    // node_index = leaf_index
-    // node_index = comp_index + leaf_count
-    // size type will store values larger than leaf indices
-    // values in [0,node_capacity-1], node_capacity ... leaf_count*2-1 for BPT
+
+    // size type for node indices and counts
+    // values in [0,node_capacity]
     typedef SizeType size_type;
 
-    typedef LevelType level_type;
+    // node index
+    // node_index = leaf_index
+    // node_index = comp_index + leaf_count
+    // values in [0,node_capacity[, node_capacity == leaf_count*2-1 for BPT
+
+    using Level = LevelType;
 
     // leaf count is fixed, will not be modified outside of init/kill
     size_type leaf_count;
@@ -65,122 +79,243 @@ struct array_tree
     // tree must be compacted to remove invalid nodes
     size_type invalid_count;
 
-    // node_index in [0, node_capacity[
-    //  leaf_index = node_index, leaf_index in [0, leaf_count[
-    //  comp_index = node_index-leaf_count, comp_index in [0, node_capacity-leaf_count[
-
     // parents :: size_type -> index_type
-    // parents array contain comp_indices, since leaves can't be parents
-    // p is parent of c : parents[c] = p-leaf_count
-    // r is root : parents[r] = node_capacity-leaf_count
-    // n is invalid : parents[n] = 0 - leaves are always valid, and 0 is valid only for leaves
-    //  - only nodes below node count are marked invalid, nodes above have undefined values
-    // INVARIANT : parents[i]+leaf_count > i - indices of parents are bigger than indices of children
+    // parents array contain comp indices, since leaves can't be parents
+    // node p is parent of c :
+    // - parents[c] = p-leaf_count
+    // node r is root :
+    // - parents[r] >= node_capacity-leaf_count
+    // node n is invalid :
+    // - parents[n] = 0 - leaves are always valid, and 0 is valid only for leaves
+    // - only nodes below node count are marked invalid, values above are undefined
+    // INVARIANTS :
+    // - parents[i]+leaf_count > i - indices of parents are bigger than indices of children
     index_type * parents;//[node_capacity]
 
+    // levels :: size_type -> level_type
+    // - leaf levels may not be present -> split to two pointers
     // leaf_levels :: index_type -> level_type
-    level_type * leaf_levels;//maybe nullptr
+    Level * leaf_levels;//[leaf_count], maybe nullptr
     // comp_levels :: index_type -> level_type
-    // leaf_levels not null -> comp_levels = leaf_levels + leaf_count
-    level_type * comp_levels;//[node_capacity-leaf_count]
+    // INVARIANTS :
+    // - !leaf_levels || (comp_levels == leaf_levels+leaf_count)
+    Level * comp_levels;//[node_capacity-leaf_count]
 
     // child_count :: index_type -> size_type
     // child_count contains PREFIX SUM of child counts for each component
-    // for node n : count = child_count[n+1]-child_count[n]
+    // - two additional elements for uniform access and simpler filling
+    // for comp n : count = child_count[n+1]-child_count[n]
     //  -> child_count[0] = 0
-    //  -> child_count[root] = node_count
-    //  -> child_count[root+1] = root_count (byproduct of counting)
+    //  -> child_count[root] = node_count (root == node_count-leaf_count)
+    //  -> child_count[root+1] = node_count (byproduct of counting)
     size_type * child_count;//[node_capacity-leaf_count+2] (two additional elements for easy counting)
 
     // children :: index_type -> size_type
-    // for BPT
+    // for altitude-tree (simple BPT)
     //  comp i has children children[2*i] and children[2*i+1]
     // for alpha-tree
     //  comp i has children children[j], j in [child_count[i], child_count[i+1][
-    size_type * children;//[(node_capacity-leaf_count)*2]
-    
+    size_type * children;//[node_capacity]
+
+    CompHandle n2c(NodeHandle n) const noexcept
+    {
+        //BOOST_ASSERT(n > 0);
+        BOOST_ASSERT(n >= leaf_count);
+        BOOST_ASSERT(n < node_count);
+        return n - leaf_count;
+    }
+    LeafHandle n2l(NodeHandle n) const noexcept
+    {
+        BOOST_ASSERT(n > 0);
+        BOOST_ASSERT(n < leaf_count);
+        return n - leaf_count;
+    }
+
+    TreeFlags flags() const noexcept
+    {
+        return 
+            (leaf_levels ? TreeFlags::LEAF_LEVELS : TreeFlags::NONE) |
+            (children    ? TreeFlags::CHILD_LIST  : TreeFlags::NONE) |
+            (child_count ? TreeFlags::CHILD_COUNT : TreeFlags::NONE);
+    }
+
+    NodeCount nodeCount() const noexcept
+    {
+        return node_count;
+    }
+
+    LeafCount leafCount() const noexcept
+    {
+        return leaf_count;
+    }
+
+    CompCount compCount() const noexcept
+    {
+        return node_count - leaf_count;
+    }
+
+    size_type rootCount() const noexcept
+    {
+        return child_count[compCount()+1]-child_count[compCount()];
+    }
+
+    void construct() noexcept
+    {
+        leaf_count    = 0;
+        node_count    = 0;
+        node_capacity = 0;
+        invalid_count = 0;
+        parents     = nullptr;
+        leaf_levels = nullptr;
+        comp_levels = nullptr;
+        child_count = nullptr;
+        children    = nullptr;
+    }
+
+    void destruct() noexcept
+    {
+        delete [] parents;
+        delete [] (leaf_levels ? leaf_levels : comp_levels);
+        delete [] child_count;
+        delete [] children;
+    }
+
+    friend void swap(Tree & a, Tree & b) noexcept
+    {
+        std::swap(a.leaf_count   , b.leaf_count   );
+        std::swap(a.node_count   , b.node_count   );
+        std::swap(a.node_capacity, b.node_capacity);
+        std::swap(a.invalid_count, b.invalid_count);
+        std::swap(a.parents    , b.parents    );
+        std::swap(a.leaf_levels, b.leaf_levels);
+        std::swap(a.comp_levels, b.comp_levels);
+        std::swap(a.child_count, b.child_count);
+        std::swap(a.children   , b.children   );
+    }
+
+    Tree() noexcept
+    {
+        construct();
+    }
+
+    Tree(Tree const & x)
+        : Tree()
+    {
+        init(x.leaf_count, x.flags(), x.node_count);
+        node_count    = x.node_count;
+        invalid_count = x.invalid_count;
+        std::copy_n(x.parents    , node_count, parents);
+        if(leaf_levels)
+            std::copy_n(x.leaf_levels, node_count, leaf_levels);
+        else
+            std::copy_n(x.comp_levels, node_count-leaf_count, comp_levels);
+        if(child_count)
+            std::copy_n(x.child_count, (node_count-leaf_count+2), child_count);
+        if(children)
+            std::copy_n(x.children   , node_count, children);
+    }
+
+    ~Tree() noexcept
+    {
+        destruct();
+    }
+
+    Tree & operator=(Tree && x) noexcept
+    {
+        swap(*this, x);
+        return *this;
+    }
+
+    Tree & operator=(Tree const & x)
+    {
+        Tree tmp(x);
+        return *this = std::move(tmp);
+    }
+
+    void kill()
+    {
+        destruct();
+        construct();
+    }
+
     void reset()
     {
-        BOOST_ASSERT(leaf_count >= 0);
-        BOOST_ASSERT(leaf_count < node_capacity);
-        BOOST_ASSERT(parents);
-        BOOST_ASSERT(comp_levels);
-        // index to mark root node
-        index_type const root = node_capacity-leaf_count;
         // the tree has no non-leaf nodes
         node_count = leaf_count;
         // including invalid nodes
         invalid_count = 0;
         // init leaves as singleton components (roots)
-        std::fill_n(parents, leaf_count, root);
+        // parents[i] == root_idx marks i as root node
+        // init leaves as singleton components (roots)
+        std::fill_n(parents, leaf_count, node_capacity-leaf_count);
+        // do not touch rest of parents
         // init leaf levels to bottom
         if(leaf_levels)
-        {
             std::fill_n(leaf_levels, leaf_count, 0);
+    }
+
+    bool init(index_type leaves, TreeFlags f = TreeFlags::ALL, size_type capacity = 0)
+    {
+        if(capacity < leaves)
+        {
+            // on default, reserve space for full binary tree
+            capacity = static_cast<size_type>(leaves)*2 - 1;
         }
+        // f -> flags() for each bit
+        if((leaf_count != leaves) || (node_capacity < capacity)
+                || ((~f | flags()) != TreeFlags::ALL))
+        {
+            if(node_capacity < capacity)
+            {
+                kill();
+                node_capacity = capacity;
+                parents = new(std::nothrow) index_type[capacity];
+                if(!parents) goto error;
+                if(underlying_value(f & TreeFlags::LEAF_LEVELS))
+                {
+                    leaf_levels = new(std::nothrow) Level[capacity];
+                    if(!leaf_levels) goto error;
+                    comp_levels = leaf_levels + leaves;
+                }
+                else
+                {
+                    comp_levels = new(std::nothrow) Level[capacity-leaves];
+                    if(!comp_levels) goto error;
+                }
+                if(underlying_value(f & TreeFlags::CHILD_COUNT))
+                {
+                    child_count = new(std::nothrow) size_type[capacity-leaves+2];
+                    if(!child_count) goto error;
+                }
+                if(underlying_value(f & TreeFlags::CHILD_LIST))
+                {
+                    children = new(std::nothrow) size_type[capacity];
+                    if(!children) goto error;
+                }
+            }
+            leaf_count = leaves;
+        }
+        reset();
+        return true;
+    error:
+        kill();
+        return false;
     }
 
-    size_type nodeCount() const noexcept
-    {
-        return node_count;
-    }
-    size_type leafCount() const noexcept
-    {
-        return leaf_count;
-    }
-    size_type componentCount() const noexcept
-    {
-        return node_count-leaf_count;
-    }
-
-    size_type bpt_merge(size_type a, size_type b)
-    {
-        BOOST_ASSERT(a >= 0);
-        BOOST_ASSERT(a < node_count);
-        BOOST_ASSERT(b >= 0);
-        BOOST_ASSERT(b < node_count);
-        BOOST_ASSERT(a != b);
-        // index to mark root node
-        index_type const root = node_capacity-leaf_count;
-        // check if merged nodes are roots
-        BOOST_ASSERT(parents[a] == root);
-        BOOST_ASSERT(parents[b] == root);
-        // allocate new node
-        BOOST_ASSERT(node_count < node_capacity);
-        size_type const n = node_count++;//node index
-        index_type const c = n-leaf_count;//component index
-        parents[a] = c; // link to c
-        parents[b] = c;
-        parents[n] = root; // mark c as root
-        // mark a, b as children of c
-        children[2*c  ] = a;
-        children[2*c+1] = b;
-        // return node_index of the new node
-        return n;
-    }
-
-    size_type bpt_merge(size_type a, size_type b, level_type l)
-    {
-        size_type n = bpt_merge(a, b);
-        // ensure increasing weights
-        BOOST_ASSERT((a < leaf_count) || (comp_levels[a-leaf_count] <= l));
-        BOOST_ASSERT((b < leaf_count) || (comp_levels[b-leaf_count] <= l));
-        // set level of new node
-        comp_levels[n-leaf_count] = l;
-        // return node_index of the new node
-        return n;
-    }
-
-    void bpt_postprocess()
+    /** \brief Merge binary nodes with same level to one n-ary node.
+     *
+     * !!! compress and build children after this.
+     */
+    void canonicalizeBinary()
     {
         // index to mark root node
-        index_type const root = node_capacity-leaf_count;
+        index_type const root = node_count-leaf_count;
         //for all nonroot & nonleaf nodes
-        for(size_type n = node_count; n >= leaf_count; --n)
+        for(size_type n = node_count-1; n >= leaf_count; --n)
         {
             index_type const c = n-leaf_count;//component index of node
-            index_type const p = parents[n];// component index of parent
-            if(p != root)
+            index_type const p = parents[n];  //component index of parent
+            if(p < root)
             {
                 if(comp_levels[c] == comp_levels[p])
                 {
@@ -195,175 +330,151 @@ struct array_tree
         }
     }
 
-    size_type alpha_merge(
-            size_type a, size_type b,
-            size_type layer_begin, level_type l,
-            index_type * merges//[node_capacity-leaf_count+1]
-            )
-    {
-        BOOST_ASSERT(a >= 0);
-        BOOST_ASSERT(a < node_count);
-        BOOST_ASSERT(b >= 0);
-        BOOST_ASSERT(b < node_count);
-        BOOST_ASSERT(a != b);
-        // index to mark root node
-        index_type const root = node_capacity-leaf_count;
-        // check if merged nodes are roots
-        BOOST_ASSERT(parents[a] == root);
-        BOOST_ASSERT(parents[b] == root);
-        // ensure increasing weights
-        BOOST_ASSERT((a < leaf_count) || (comp_levels[a-leaf_count] <= l));
-        BOOST_ASSERT((b < leaf_count) || (comp_levels[b-leaf_count] <= l));
-        // simplify merge
-        if(a < b) // a < b -> level(a) < level(b)
-            std::swap(a, b);
-        // if a is leaf, b must be too
-        BOOST_ASSERT((a >= leaf_count) || (b < leaf_count));
-        // a or b is leaf, or level(a) >= level(b)
-        BOOST_ASSERT((a < leaf_count) || (b < leaf_count) || (comp_levels[a-leaf_count] >= comp_levels[b-leaf_count]));
-        // lift a
-        if(a < layer_begin)
-        {
-            // ensure by level check
-            BOOST_ASSERT((a < leaf_count) || (comp_levels[a-leaf_count] < l));
-            // allocate new node
-            BOOST_ASSERT(node_count < node_capacity);
-            size_type const n = node_count++;
-            // link a to n
-            parents[a] = n-leaf_count;
-            parents[n] = root;
-            // set level of n
-            comp_levels[n-leaf_count] = l;
-            // insert identity loop to merges
-            merges[n-leaf_count] = n-leaf_count;
-            // forget about old a
-            a = n;
-        }
-        // a is now nonleaf node on this level
-        BOOST_ASSERT(a >= leaf_count);
-        BOOST_ASSERT(a >= layer_begin);
-        BOOST_ASSERT(comp_levels[a-leaf_count] == l);
-        // connect or merge b
-        parents[b] = a-leaf_count; // set a as parent of b
-        if(b >= layer_begin)
-        {
-            // mark b to be merged into a
-            ++invalid_count;
-            merges[b-leaf_count] = a-leaf_count;
-        }
-        // return (possibly new) common root
-        return a;
-    }
-
-    void finish_alpha_merges(
-            index_type * merges//[node_capacity-leaf_count+1]
-            )
-    {
-        if(invalid_count > 0)
-        {
-            merges[leaf_count-1] = leaf_count-1;
-            // traverse tree from root to leaves
-            for(size_type i = node_count-leaf_count; i-- > 0;)
-            {
-                BOOST_ASSERT(merges[i] >= i);
-                if(i == merges[i])
-                {
-                    parents[i+leaf_count] = merges[parents[i+leaf_count]];
-                }
-                else
-                {
-                    merges[i] = merges[merges[i]];
-                    parents[i+leaf_count] = 0;
-                }
-            }
-            // set parents for leaves
-            for(size_type i = 0; i < leaf_count; ++i)
-            {
-                parents[i] = merges[parents[i]];
-            }
-        }
-    }
-
     void compress(
-            index_type * lut//[node_count-leaf_count]
-            )
+            index_type * lut = nullptr//[node_count-leaf_count]
+        )
     {
         if(invalid_count > 0)
         {
+            // allocate temporary lut if not 
+            boost::scoped_array<index_type> tmp;
+            if(!lut)
+            {
+                lut = new index_type[node_count-leaf_count];
+                tmp.reset(lut);
+            }
+
+            size_type const old_count = node_count-leaf_count;
             index_type count = 0;
-            for(size_type i = 0; i < node_count-leaf_count; ++i)
+            for(size_type i = 0; i < old_count; ++i)
             {
                 if(parents[i+leaf_count] != 0)
                 {
                     size_type const n = count++;
                     parents[n+leaf_count] = parents[i+leaf_count];
-                    comp_levels[n+leaf_count] = comp_levels[n+leaf_count];
+                    comp_levels[n] = comp_levels[i];
                     lut[i] = n;
                 }
             }
+            // set correct counts
             node_count = leaf_count+count;
             invalid_count = 0;
             // set correct parents for all nodes
+            // - keep roots as roots
             for(size_type i = 0; i < node_count; ++i)
             {
-                parents[i] = lut[parents[i]];
+                if(parents[i] < old_count)
+                    parents[i] = lut[parents[i]];
             }
         }
     }
 
-    // count
-    // {0, 0,
-    //  count[2+0] = count 0
-    //  ...
-    //  count[2+comp_count-1] = count (comp_count-1)
-    //  count[2+comp_count] = undefined
-    //  ...
-    //  count[2+root] = root_count
-    // } - node_capacity-leaf_count+3
-    // partial sum from 3 to comp_count-1, handle root end by hand
-    // {0, 0,
-    //  count[2+0] = count 0
-    //  count[2+1] = count 0+1,
-    //  ...
-    //  count[2+comp_count-1] = node_count-root_count,
-    //  count[2+comp_count] = invalid 
-    //  ...
-    //  count[2+root] = root_count
-    // }
-    // handle root stuff
-    //  TODO
-    // assign children
-    //  TODO
-    void build_children()
+    /**
+     * heights[0..(nc-lc-1)] will be heights of tree component nodes
+     * heights[nc-lc] contains height of pseudo-root (virtual parent of all roots)
+     */
+    template<typename Height = index_type>
+    Height height(
+            Height * heights = nullptr//[node_count-leaf_count+1]
+        )
+    {
+        boost::scoped_array<Height> tmp;
+        if(!heights)
+        {
+            heights = new Height[node_count-leaf_count+1];
+            tmp.reset(heights);
+        }
+        std::fill_n(heights, node_count-leaf_count+1, 0);
+
+        // index to mark root node 
+        // - parents[i] >= root if i is root
+        index_type const root = node_count-leaf_count;
+        // go through leaves
+        for(size_type i = 0; i < leaf_count; ++i)
+        {
+            heights[std::min(parents[i], root)] = 1;
+        }
+
+        for(size_type i = leaf_count; i < node_count; ++i)
+        {
+            index_type const p = std::min(parents[i], root);
+            if(heights[p] <= heights[i-leaf_count])
+            {
+                BOOST_ASSERT(heights[i-leaf_count] < std::numeric_limits<Height>::max());
+                heights[p] = heights[i-leaf_count]+1;
+            }
+        }
+        
+        // pseudo root has tree height + 1
+        return heights[root]-1;
+    }
+
+    /**
+     * For node i :
+     * - i has (child_count[i-leaf_count+1]-child_count[i-leaf_count]) children
+     * - these children are in children[child_count[i-leaf_count]..child_count[i-leaf_count][
+     * - for i = (node_count-leaf_count), this gives the roots
+     */
+    void buildChildren()
     {
         BOOST_ASSERT(invalid_count == 0);
         // index to mark root node
-        index_type const root = node_capacity-leaf_count;
+        // - parents[i] >= root -> i is root
+        index_type const root = node_count-leaf_count;
         // initialize counts
-        std::fill_n(child_count, node_count-leaf_count+2, 0);
-        child_count[root+2] = 0;
+        std::fill_n(child_count, root+3, 0);
         // count children
-        child_count[0] = child_count[1] = 0;
         for(size_type i = 0; i < node_count; ++i)
         {
-            ++child_count[parents[i]+2];
+            ++child_count[std::min(parents[i], root)+2];
         }
         // prefix sum
-        for(size_type i = 2; i < (node_count-leaf_count+2); ++i)
+        for(size_type i = 2; i < (root+2); ++i)
         {
             child_count[i+1] += child_count[i];
         }
-        // set :
-        //  child_count[root+1] = nonroot node count
-        //  child_count[root+2] = node_count
-        child_count[root+1] = child_count[node_count-leaf_count+1];
-        child_count[root+2] += child_count[root+1];
-        // assign children
-        // also moves child_count[i+1] to child_count[i]
+        BOOST_ASSERT(child_count[0] == 0);
+        BOOST_ASSERT(child_count[1] == 0);
+        BOOST_ASSERT(child_count[root+2] == node_count);
+        // set
         for(size_type i = 0; i < node_count; ++i)
         {
-            children[child_count[parents[i]+1]++] = i;
-            // this is the reason, why child_count[root+1] was set to nonroot_count
+            children[child_count[std::min(parents[i], root)+1]++] = i;
+        }
+        BOOST_ASSERT(child_count[0] == 0);
+        BOOST_ASSERT(child_count[root+1] == node_count);
+        BOOST_ASSERT(child_count[root+2] == node_count);
+    }
+
+    /*
+     * Update array of component indices based on transformation performed by
+     * Tree::alphaFinish or Tree::compress.
+     * lut is pointer to the array used by these tree transformations.
+     */
+    void updateCompIndices(index_type const * lut, index_type * indices, size_t count)
+    {
+        for(size_t i = 0; i < count; ++i)
+            indices[i] = lut[indices[i]];
+    }
+
+    template<typename Count>
+    void componentHistogram(
+            Count * hist,//[node_count-leaf_count+1] +1 for pseudo-root
+            index_type const * comps, size_t count
+        )
+    {
+        // index of pseudo-root
+        auto const root = node_count-leaf_count;
+        std::fill_n(hist, root+1, 0);
+        for(size_t i = 0; i < count; ++i)
+        {
+            ++hist[std::min(comps[i], root)];
         }
     }
 };
+
+}//namespace array
+#include "array_tree.inl"
+}//namespace cct
+
+#endif//LIBCCT_ARRAY_TREE_H_INCLUDED

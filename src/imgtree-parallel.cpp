@@ -18,6 +18,9 @@
 
 #include <opencv2/highgui/highgui.hpp>
 
+#include <tbb/task_scheduler_init.h>
+#include <tbb/task_group.h>
+
 // Command line arguments
 
 struct arg_lit * child_list = nullptr;
@@ -32,13 +35,15 @@ void process(
     int id, char const * filename, cv::Mat const & image
 )
 {
+    typedef cv::Size_<uint16_t> Size;
     typedef cct::image::Component<Alpha> Component;
     typedef cct::image::Leaf Leaf;
     typedef cct::Tree<Component, Leaf> Tree;
     typedef cct::Builder<Tree> Builder;
+    typedef typename Tree::size_type size_type;
 
-    cv::Size const size = image.size();
-    cv::Size const tile(tile_width->ival[0], tile_height->ival[0]);
+    Size const size = image.size();
+    Size const tile(tile_width->ival[0], tile_height->ival[0]);
 
     boost::accumulators::accumulator_set<double, boost::accumulators::features<
         boost::accumulators::tag::min,
@@ -46,7 +51,7 @@ void process(
         boost::accumulators::tag::mean
         > > time_statistics;
 
-    Tree tree(cct::image::vertexCount(image.size()));
+    Tree tree(cct::image::vertexCount<size_type>(image.size()));
     Builder builder(&tree);
 
     for(int i = 0; i < measurements->ival[0]; ++i)
@@ -72,6 +77,6 @@ void process(
         << boost::accumulators::max(time_statistics) << ','
         << boost::accumulators::mean(time_statistics)
         << std::endl;
-}        
+}
 
 #include "imgtree.h"

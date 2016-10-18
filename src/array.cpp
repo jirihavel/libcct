@@ -2,8 +2,7 @@
 #include <iostream>
 #include "cct/array_tree.h"
 #include "cct/image.h"
-
-#include "utils/abs_diff.h"
+#include "cct/metric.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -294,7 +293,7 @@ int main(int argc, char * argv[])
     std::unique_ptr<uint32_t[]> edge_comps(new uint32_t[edge_count]);
 
 //    cct::img::buildTree<cct::AlphaTreeBuilder, utils::LInf, uint16_t>(bgr, tree, edge_comps.get());
-    cct::img::buildTree<cct::AlphaTreeBuilder, utils::LInf, uint16_t>(img, tree, edge_comps.get());
+    cct::img::buildTree<cct::AlphaTreeBuilder, cct::metric::LInf>(img, tree, edge_comps.get());
 
 //    cct::image::buildTree<cct::AlphaTreeBuilder, utils::LInf, uint16_t>(img, tree, edge_comps.get());
 //    cct::image::buildTree<cct::AltitudeTreeBuilder, utils::LInf, uint16_t>(img, tree, edge_comps.get());

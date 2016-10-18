@@ -21,7 +21,7 @@ FLAGS:=-Wall -Wextra
 ifneq ($(DEBUG),)
  SUFFIX:=-d
  CONFIG:=debug
- FLAGS+=-O0 -ggdb
+ FLAGS+=-O0 -ggdb -DBOOST_DISABLE_ASSERTS
 else
  FLAGS+=-O2 -g0 -DNDEBUG -DBOOST_DISABLE_ASSERTS
 endif
@@ -59,15 +59,53 @@ check:check-libcct-array check-libcct-struct
 
 WANT_TARGET:=1
 
-NAME:=test-union-find
+DATA=data/big
+IMAGES:=$(wildcard $(DATA)/*.jpg) $(wildcard $(DATA)/*.tif)
+
 PKGS:=boost opencv
+
+NAME:=test-extract
+SRCS:=$(SRCDIR)/test/extract.cpp
+include $(MAKEDIR)/bin.make
+
+.PHONY:extract
+extract:bin/test-extract$(SUFFIX)$(BINEXT)
+	$< $(IMAGES)
+
+NAME:=test-union-find
 SRCS:=$(SRCDIR)/test/union_find.cpp
 include $(MAKEDIR)/bin.make
 
+.PHONY:union-find
+union-find:bin/test-union-find$(SUFFIX)$(BINEXT)
+	$< $(IMAGES)
+
+.PHONY:imgtree
+imgtree:imgtree-array imgtree-struct
+
+PKGS:=argtable2 boost_chrono opencv
+
+NAME:=imgtree-najman
+SRCS:=$(SRCDIR)/imgtree-najman.cpp
+include $(MAKEDIR)/bin.make
+
 NAME:=imgtree-array
-PKGS:=argtable2 boost opencv
 SRCS:=$(SRCDIR)/imgtree-array.cpp
 include $(MAKEDIR)/bin.make
+
+NAME:=imgtree-struct
+SRCS:=$(SRCDIR)/imgtree-struct.cpp
+include $(MAKEDIR)/bin.make
+
+N=10
+#D=0
+PREFIX=bsds
+OUT=data/out
+MACHINE=i7
+P=
+
+test-%:bin/imgtree-%$(SUFFIX)$(BINEXT)
+	$< $(IMAGES) -n$N $P > data/$*-$(PREFIX)-$(MACHINE)-d0.csv
 
 # -- Binaries --
 
@@ -77,7 +115,7 @@ SRCS:=$(SRCDIR)/array.cpp
 include $(MAKEDIR)/bin.make
 
 NAME:=struct
-PKGS:=boost_system opencv
+PKGS:=argtable2 boost_system opencv
 SRCS:=$(SRCDIR)/struct.cpp
 include $(MAKEDIR)/bin.make
 

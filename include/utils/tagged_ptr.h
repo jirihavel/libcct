@@ -108,7 +108,8 @@ template<
     typename T,
     std::size_t TagBits
 >
-class tagged_ptr : private internal::tagged_ptr_base<T, TagBits>
+class tagged_ptr
+    : private internal::tagged_ptr_base<T, TagBits>
 {
     typedef internal::tagged_ptr_base<T, TagBits> base;
 public :
@@ -125,23 +126,32 @@ public :
      * pointer=nullptr, tag=0
      */
     explicit constexpr tagged_ptr(std::nullptr_t) noexcept
-    : base(nullptr) {}
+        : base(nullptr) {}
 
     /** \brief Construct from pointer
      * pointer=p, tag=0
      * p must be aligned
      */
     explicit tagged_ptr(pointer_type p) noexcept
-    : base(p)
+        : base(p)
     {
         BOOST_ASSERT(base::ptr_aligned(p));
+    }
+
+    /** \brief Construct from tag
+     * pointer=nullptr, tag=t
+     */
+    explicit tagged_ptr(tag_type t) noexcept
+        : base(nullptr, t)
+    {
+        BOOST_ASSERT(t <= base::tag_mask);
     }
 
     /** \brief Construct from pointer + tag
      * pointer=p, tag=t
      */
     tagged_ptr(pointer_type p, tag_type t) noexcept
-    : base(p, t)
+        : base(p, t)
     {
         BOOST_ASSERT(base::ptr_aligned(p));
         BOOST_ASSERT(t <= base::tag_mask);

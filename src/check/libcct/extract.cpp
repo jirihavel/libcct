@@ -37,7 +37,7 @@ BOOST_AUTO_TEST_CASE( extract_vert_optional )
     vert_count = cct::img::getImageVertices(size, &verts[0],
             [](cv::Point_<uint32_t> const & p)
             {
-                return boost::optional<uint8_t>(!(p.y&1), 0);
+                return boost::optional<uint8_t>(!(p.y&1), p.x%UINT8_MAX);
             });
 
     BOOST_CHECK_EQUAL(vert_count, size_t(cct::img::vertexCount(size))/2);
@@ -70,11 +70,12 @@ BOOST_AUTO_TEST_CASE( extract_unsorted )
     std::vector<cct::Vertex<uint32_t, uint8_t>> verts(cct::img::vertexCount(size));
     verts.resize(
             cct::img::getImageVertices(size, verts.data(),
-                utils::fp::constant<std::integral_constant<uint8_t,0>>())
-        );
+                [](cv::Point_<uint32_t> const & p)
+                {
+                    return p.x%UINT8_MAX;
+                }));
 
     BOOST_CHECK_EQUAL(verts.size(), size_t(cct::img::vertexCount(size)));
-    BOOST_CHECK(std::is_sorted(verts.begin(), verts.end()));
 
     cct::img::Connectivity const c[4] = {
         cct::img::Connectivity::C4, cct::img::Connectivity::C6P,
@@ -90,13 +91,15 @@ BOOST_AUTO_TEST_CASE( extract_unsorted )
             );
 
         BOOST_CHECK_EQUAL(edges.size(), size_t(cct::img::edgeCount(size, c[i])));
-        BOOST_CHECK(std::is_sorted(edges.begin(), edges.end()));
 
         std::vector<cct::Vertex<uint32_t, uint8_t>> verts1(cct::img::vertexCount(size));
         std::vector<cct::Edge<uint32_t, uint8_t>> edges1(cct::img::edgeCount(size, c[i]));
         auto const count = cct::img::getImageGraph(
                 size, &verts1[0], &edges1[0],
-                utils::fp::constant<std::integral_constant<uint8_t,0>>(),
+                [](cv::Point_<uint32_t> const & p)
+                {
+                    return p.x%UINT8_MAX;
+                },
                 utils::fp::constant<std::integral_constant<uint8_t,0>>(),
                 CCT_WHOLE_IMAGE_RECT, c[i]
             );
@@ -105,9 +108,6 @@ BOOST_AUTO_TEST_CASE( extract_unsorted )
 
         BOOST_CHECK_EQUAL(verts1.size(), size_t(cct::img::vertexCount(size)));
         BOOST_CHECK_EQUAL(edges1.size(), size_t(cct::img::edgeCount(size, c[i])));
-
-        BOOST_CHECK(std::is_sorted(verts1.begin(), verts1.end()));
-        BOOST_CHECK(std::is_sorted(edges1.begin(), edges1.end()));
 
         BOOST_CHECK(verts == verts1);
         BOOST_CHECK(edges == edges1);
@@ -121,8 +121,10 @@ BOOST_AUTO_TEST_CASE( extract_sorted )
     std::vector<cct::Vertex<uint32_t, uint8_t>> verts(cct::img::vertexCount(size));
     verts.resize(
             cct::img::getSortedImageVertices(size, verts.data(),
-                utils::fp::constant<std::integral_constant<uint8_t,0>>())
-        );
+                [](cv::Point_<uint32_t> const & p)
+                {
+                    return p.x%UINT8_MAX;
+                }));
 
     BOOST_CHECK_EQUAL(verts.size(), size_t(cct::img::vertexCount(size)));
 
@@ -145,7 +147,10 @@ BOOST_AUTO_TEST_CASE( extract_sorted )
         std::vector<cct::Edge<uint32_t, uint8_t>> edges1(cct::img::edgeCount(size, c[i]));
         auto const count = cct::img::getSortedImageGraph(
                 size, &verts1[0], &edges1[0],
-                utils::fp::constant<std::integral_constant<uint8_t,0>>(),
+                [](cv::Point_<uint32_t> const & p)
+                {
+                    return p.x%UINT8_MAX;
+                },
                 utils::fp::constant<std::integral_constant<uint8_t,0>>(),
                 CCT_WHOLE_IMAGE_RECT, c[i]
             );
@@ -161,43 +166,67 @@ BOOST_AUTO_TEST_CASE( extract_sorted )
 }
 
 template<typename C, int N>
-using LInf8 = utils::LInf<uint8_t, C, N>;
+using LInf = utils::metric::Lp<SIZE_MAX, C, N>;
 
 template<typename C, int N>
-using LInf8Gen = utils::LInf<uint8_t, C, 0>;
-/*
+using LInfGen = utils::metric::Lp<SIZE_MAX, C, 0>;
+
 BOOST_AUTO_TEST_CASE( image_extract )
 {
     cv::Mat_<cv::Vec3b> img = cv::imread("data/check/test.jpg");
+    
+    using Edge = cct::Edge<uint32_t, uint8_t>;
 
-    std::vector<cct::Edge<uint16_t, uint8_t>> edges_fix(cct::img::edgeCount(img.size()));
-    cct::img::getImageEdges(img.size(), edges_fix.data(), utils::LInf<uint8_t, uint8_t, 3>(img));
+    std::vector<Edge> edges_ref(cct::img::edgeCount(img.size()));
+    cct::img::getImageEdges(img.size(), edges_ref.data(), LInf<uint8_t, 3>(img));
 
-    std::vector<cct::Edge<uint16_t, uint8_t>> edges_gen(cct::img::edgeCount(img.size()));
-    cct::img::getImageEdges(img.size(), edges_gen.data(), utils::LInf<uint8_t, uint8_t, 0>(img));
+    std::vector<Edge> edges(cct::img::edgeCount(img.size()));
 
-    BOOST_CHECK(edges_fix == edges_gen);
+    cct::img::getImageEdges(img.size(), edges.data(), LInf<uint8_t, 0>(img));
+    BOOST_CHECK(edges_ref == edges);
 
-    std::vector<cct::Edge<uint16_t, uint8_t>> edges_fix_tst(cct::img::edgeCount(img.size()));
-    cct::img::getImageEdges<LInf8>(img, edges_fix_tst.data());
+    cct::img::getImageEdges<LInf>(img, edges.data());
+    BOOST_CHECK(edges_ref == edges);
 
-    BOOST_CHECK(edges_fix == edges_fix_tst);
-
-    std::vector<cct::Edge<uint16_t, uint8_t>> edges_gen_tst(cct::img::edgeCount(img.size()));
-    cct::img::getImageEdges<LInf8Gen>(img, edges_gen_tst.data());
-
-    BOOST_CHECK(edges_fix == edges_gen_tst);
+    cct::img::getImageEdges<LInfGen>(img, edges.data());
+    BOOST_CHECK(edges_ref == edges);
 
     cv::Mat img_gen = img;
 
-    std::vector<cct::Edge<uint16_t, uint8_t>> edges_switch(cct::img::edgeCount(img.size()));
-    cct::img::getImageEdges<LInf8>(img_gen, edges_switch.data());
+    cct::img::getImageEdges<LInf>(img_gen, edges.data());
+    BOOST_CHECK(edges_ref == edges);
 
-    BOOST_CHECK(edges_fix == edges_switch);
-
-    std::vector<cct::Edge<uint16_t, uint8_t>> edges_switch_gen(cct::img::edgeCount(img.size()));
-    cct::img::getImageEdges<LInf8Gen>(img_gen, edges_switch_gen.data());
-
-    BOOST_CHECK(edges_fix == edges_switch_gen);
+    cct::img::getImageEdges<LInfGen>(img_gen, edges.data());
+    BOOST_CHECK(edges_ref == edges);
 }
-*/
+
+BOOST_AUTO_TEST_CASE( image_extract_sorted )
+{
+    cv::Mat_<cv::Vec3b> img = cv::imread("data/check/test.jpg");
+    
+    using Edge = cct::Edge<uint32_t, uint8_t>;
+
+    std::vector<Edge> edges_ref(cct::img::edgeCount(img.size()));
+    cct::img::getSortedImageEdges(img.size(), edges_ref.data(), LInf<uint8_t, 3>(img));
+
+    BOOST_CHECK(std::is_sorted(edges_ref.begin(), edges_ref.end()));
+
+    std::vector<Edge> edges(cct::img::edgeCount(img.size()));
+
+    cct::img::getSortedImageEdges(img.size(), edges.data(), LInf<uint8_t, 0>(img));
+    BOOST_CHECK(edges_ref == edges);
+
+    cct::img::getSortedImageEdges<LInf>(img, edges.data());
+    BOOST_CHECK(edges_ref == edges);
+
+    cct::img::getSortedImageEdges<LInfGen>(img, edges.data());
+    BOOST_CHECK(edges_ref == edges);
+
+    cv::Mat img_gen = img;
+
+    cct::img::getSortedImageEdges<LInf>(img_gen, edges.data());
+    BOOST_CHECK(edges_ref == edges);
+
+    cct::img::getSortedImageEdges<LInfGen>(img_gen, edges.data());
+    BOOST_CHECK(edges_ref == edges);
+}

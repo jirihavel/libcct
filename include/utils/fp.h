@@ -1,13 +1,15 @@
 #ifndef FUNCTIONAL_PROGRAMMING_H_INCLUDED
 #define FUNCTIONAL_PROGRAMMING_H_INCLUDED
 
-#include <cmath> // std::sqrt
+#include <cmath>   // sqrt
+#include <cstddef> // nullptr_t
 
-#include <type_traits> // std::integral_constant
-#include <utility> // std::move, std::forward
+#include <type_traits> // integral_constant
+#include <utility>     // move, forward
+
+#include <boost/assert.hpp>
 
 namespace utils {
-
 namespace fp {
 
 struct ignore
@@ -18,16 +20,23 @@ struct ignore
     }
 };
 
+struct identity
+{
+    template<typename X>
+    X operator()(X && x) const
+    {
+        return std::forward<X>(x);
+    }
+};
+
 template<typename Value>
 class constant
 {
     Value const m_value;
 public :
     template<typename ... Args>
-    explicit constant(Args && ... args)
-        : m_value(std::forward<Args>(args)...)
-    {
-    }
+    explicit constexpr constant(Args && ... args)
+        : m_value(std::forward<Args>(args)...) {}
 
     constant(constant const &) = default;
     constant(constant &&) = default;
@@ -35,9 +44,19 @@ public :
     constant & operator=(constant &&) = default;
 
     template<typename ... Args>
-    Value operator()(Args && ...) const
+    constexpr Value operator()(Args && ...) const
     {
         return m_value;
+    }
+};
+
+template<>
+struct constant<std::nullptr_t>
+{
+    template<typename ... Args>
+    constexpr std::nullptr_t operator()(Args && ...) const noexcept
+    {
+        return nullptr;
     }
 };
 
@@ -46,14 +65,19 @@ struct constant<std::integral_constant<T, v>>
     : public std::integral_constant<T, v>
 {
     template<typename ... Args>
-    T operator()(Args && ...) const noexcept
+    constexpr T operator()(Args && ...) const noexcept
     {
         return v;
     }
 };
 
-typedef constant<std::true_type > constant_true;
-typedef constant<std::false_type> constant_false;
+using constant_null = constant<std::nullptr_t>;
+
+using constant_true  = constant<std::true_type >;
+using constant_false = constant<std::false_type>;
+
+template<int N>
+using constant_int = constant<std::integral_constant<int, N>>;
 
 // Math stuff
 
@@ -76,6 +100,29 @@ struct sqrt
 };
 
 }//namespace fp
+
+template<typename T>
+class assumption
+    : private fp::constant<T>
+{
+    using base = fp::constant<T>;
+public :
+    assumption(T const & y)
+        : base(y) {}
+
+    template<typename X>
+    X const & operator=(X const & x)
+    {
+        BOOST_ASSERT(base::operator()() == x);
+        return x;
+    }
+};
+
+template<typename T>
+assumption<T> assume(T const & x)
+{
+    return assumption<T>(x);
+}
 
 }//namespace utils
 

@@ -1,12 +1,11 @@
-template<typename Alpha, typename WeightFunctor>
-void process(
-    int id, char const * filename, cv::Mat const & image
-);
+#include <cct/metric.h>
+
+#include <opencv2/highgui/highgui.hpp>
 
 struct arg_int * imread_flags = nullptr;
 struct arg_file * input_files = nullptr;
-    
-template<typename Weight, template<typename A, typename C, int N> class WeightFunctor>
+
+template<typename Weight, template<typename, int> class WeightFunctor>
 int process()
 {
     std::cout << "id,name,width,height,leaves,edges,components,height,roots,degenerates,minTime,maxTime,meanTime\n";
@@ -19,27 +18,7 @@ int process()
             return EXIT_FAILURE;
         }
 
-        switch(image.type())
-        {
-            case CV_8UC1 :
-                process<Weight, WeightFunctor<Weight, uint8_t,1>>(
-                    i, input_files->filename[i], image
-                );
-                break;
-            case CV_8UC3 :
-                process<Weight, WeightFunctor<Weight, uint8_t,3>>(
-                    i, input_files->filename[i], image
-                );
-                break;
-            //case CV_16UC1 :
-            //    process<uint16_t, utils::MaxAbsDiff<uint16_t,1>>(
-            //        i, imgname->filename[i], image,
-            //        measurements->ival[0], parallel_depth->ival[0], cv::Size(tile_width->ival[0], tile_height->ival[0])
-            //    );
-            //    break;
-            default :
-                std::cerr << "Unknown pixel type " << image.type() << std::endl;
-        }
+        process<Weight, WeightFunctor>(i, input_files->filename[i], image);
     }
     return EXIT_SUCCESS;
 }
@@ -94,16 +73,16 @@ int main(int argc, char * argv[])
     switch(edge_norm->ival[0])
     {
         case 0 :
-            retval = process<uint8_t, utils::MaxAbsDiff>();
+            retval = process<uint8_t, cct::metric::LInf>();
             break;
         case 1 :
-            retval = process<uint16_t, utils::L1AbsDiff>();
+            retval = process<uint16_t, cct::metric::L1>();
+            break;
+        case 2 :
+            retval = process<float, cct::metric::L2>();
             break;
         default :
             std::cerr << "L" << edge_norm->ival[0] << " norm not implemented" << std::endl;
-        //case 2 :
-        //    retval = process<float, utils::L2AbsDiff>();
-        //    break;
     }
 
     return retval;

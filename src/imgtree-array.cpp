@@ -1,11 +1,9 @@
 #define BOOST_ENABLE_ASSERT_HANDLER
 
-#include "cct/array_builder.h"
-
-#include "utils/abs_diff.h"
+#include <cct/array_tree.h>
+#include <cct/image.h>
 
 #include <chrono>
-#include <fstream>
 #include <iostream>
 
 #include <boost/accumulators/accumulators.hpp>
@@ -16,7 +14,7 @@
 
 #include <argtable2.h>
 
-#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/core/core.hpp>
 
 // Command line arguments
 
@@ -27,13 +25,13 @@ struct arg_int * tile_height = nullptr;
 struct arg_int * parallel_depth = nullptr;
 struct arg_lit * parallel_nomerge = nullptr;
 
-template<typename Alpha, typename WeightFunctor>
+template<typename Alpha, template<typename, int> class EdgeWeightFunctor>
 void process(
     int id,
     char const * filename, cv::Mat const & image
 )
 {
-    //typedef cct::image::Edge<uint16_t, Alpha> Edge;
+    typedef cct::array::Tree<uint32_t, uint32_t, Alpha> Tree;
 
     boost::accumulators::accumulator_set<double, boost::accumulators::features<
         boost::accumulators::tag::min,
@@ -41,56 +39,37 @@ void process(
         boost::accumulators::tag::mean
         > > time_statistics;
 
-    size_t const vertex_count = cct::image::vertexCount(image.size());
-    //size_t const edge_count = cct::image::edgeCount(image.size());
+//    cv::Size_<uint16_t> const size = image.size();
+//    cv::Size_<uint16_t> const tile(tile_width->ival[0], tile_height->ival[0]);
 
-    cv::Size_<uint16_t> const size = image.size();
-    cv::Size_<uint16_t> const tile(tile_width->ival[0], tile_height->ival[0]);
+    Tree tree;
 
-    size_t component_count;
+    size_t edge_count;
+    uint32_t root_count;
+
+    size_t h = 0;
 
     for(int i = 0; i < measurements->ival[0]; ++i)
     {
         auto t1 = boost::chrono::high_resolution_clock::now();
-
-        array_tree<uint32_t, uint32_t, Alpha> t;//(vertex_count);
-        t.leaf_count = vertex_count;
-        t.node_count = vertex_count;
-        t.node_capacity = 2*vertex_count-1;
-        t.invalid_count = 0;
-        t.parents = new uint32_t[t.node_capacity];
-        t.leaf_levels = new Alpha[t.node_capacity];
-        t.comp_levels = t.leaf_levels + t.leaf_count;
-        t.child_count = new uint32_t[(t.node_capacity-t.leaf_count)+3];
-        t.children = new uint32_t[(t.node_capacity-t.leaf_count)*2];
-        t.reset();
-
-        cct::image::buildAlphaTree(size, tile, t, WeightFunctor(image));
-        if(child_list->count)
-            t.build_children();
- 
+        std::tie(edge_count, root_count)
+            = cct::img::buildTree<cct::AlphaTreeBuilder, EdgeWeightFunctor>(image, tree, nullptr);
         auto t2 = boost::chrono::high_resolution_clock::now();
 
-        component_count = t.componentCount();
-
-        delete [] t.parents;
-        delete [] t.leaf_levels;
-        delete [] t.child_count;
-        delete [] t.children;
+        h += tree.height();
 
         time_statistics(boost::chrono::duration_cast<boost::chrono::duration<double>>(t2-t1).count());
     }
 
+    auto const height = tree.height();
+
     std::cout
         << id << ',' << filename << ',' << image.cols << ',' << image.rows << ','
-        << cct::image::vertexCount(image.size()) << ',' << cct::image::edgeCount(image.size()) << ','
-        << component_count << ','
-        << 0 << ','
-        << 0 << ','
-        << 0 << ','
-//        << tree.calcHeight() << ','
-//        << tree.rootCount() << ','
-//        << tree.countDegenerateComponents() << ','
+        << cct::img::vertexCount(image.size()) << ',' << edge_count << ','
+        << (tree.node_count - tree.leaf_count) << ','
+        << height << ','
+        << root_count << ','
+        << (h/measurements->ival[0]) << ','
         << boost::accumulators::min(time_statistics) << ','
         << boost::accumulators::max(time_statistics) << ','
         << boost::accumulators::mean(time_statistics)
